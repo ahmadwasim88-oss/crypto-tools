@@ -24,6 +24,7 @@
   --trim-dim: rgba(232,166,59,0.12);
   --hold: #7d8998;
   --target: #f5d90a;
+  --rsi: #c792ea;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Roboto Mono", Consolas, monospace;
   --font-ui: -apple-system, "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --r-sm: 6px;
@@ -40,6 +41,7 @@ html, body {
   -webkit-font-smoothing: antialiased;
   max-width: 100%;
   overflow-x: hidden;
+  overflow-anchor: none;
 }
 body { padding: 8px 8px calc(52px + env(safe-area-inset-bottom, 0px)); }
 .app { max-width: min(100%, 1400px); margin: 0 auto; }
@@ -156,8 +158,8 @@ th {
 }
 th.sortable { cursor: pointer; user-select: none; }
 th.sortable:hover { color: var(--text); }
-.sort-arrow { margin-left: 4px; opacity: 0.6; }
-tbody tr.main-row { border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.12s ease; }
+.sort-arrow { margin-left: 4px; color: var(--accent); font-weight: 700; }
+tbody tr.main-row { border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.12s ease; scroll-margin-top: 40px; }
 tbody tr.main-row:hover { background: rgba(255,255,255,0.025); }
 tbody tr.main-row:last-child { border-bottom: none; }
 td[data-col="coin"] { max-width: 44px; overflow: hidden; text-overflow: ellipsis; }
@@ -228,6 +230,7 @@ td[data-col="coin"] { max-width: 44px; overflow: hidden; text-overflow: ellipsis
 .detail-item .value.buy { color: var(--buy); }
 .detail-item .value.sell { color: var(--sell); }
 .detail-item .value.target-pct { color: var(--target); }
+.detail-item .value.rsi-value { color: var(--rsi); }
 .detail-item .sub-value { font-family: var(--font-mono); font-size: 10px; color: var(--muted-2); margin-top: 2px; }
 .detail-item .sub-value.buy { color: var(--buy); }
 .detail-item .sub-value.sell { color: var(--sell); }
@@ -302,6 +305,7 @@ td[data-col="coin"] { max-width: 44px; overflow: hidden; text-overflow: ellipsis
 }
 .chart-external-link:hover { color: var(--accent); }
 .chart-container {
+  display: none;
   margin-top: 10px;
   border-radius: var(--r-sm);
   overflow: hidden;
@@ -847,42 +851,42 @@ function classifyHolding(md, item, ta, macroTa) {
     signal = 'EXIT'; colorKey = 'sell';
     strength = (noTradingData || zeroMcap) ? 90 : Math.max(60, Math.min(95, Math.round(100 - ((volMcapRatio ?? 0) / LIQUIDITY_DEAD_RATIO) * 40)));
     reason = noTradingData
-      ? `No volume or market-cap data from CoinGecko — usually means trading has effectively stopped. A liquidity call, not a price call. Verify manually before assuming anything about this position.`
+      ? `No volume or market-cap data from CoinGecko — trading has likely stopped. Verify manually.`
       : zeroMcap
-      ? `CoinGecko reports a real ₹0 market cap — typically a defunct, delisted, or migrated token, regardless of the ATH-distance number. Verify manually.`
+      ? `CoinGecko reports a ₹0 market cap — likely defunct, delisted, or migrated. Verify manually.`
       : negligibleVolume
-      ? `Volume (${formatINR(volume)}) is negligible in absolute terms against a ${formatINR(mcap)} market cap, even though the ratio alone doesn't clear the dead threshold. No real market to sell into.`
-      : `Volume/market-cap ratio (${(volMcapRatio * 100).toFixed(2)}%) has dried up. Unrelated to price — there may be no real market left here even if it recovers.`;
+      ? `Volume (${formatINR(volume)}) is negligible against a ${formatINR(mcap)} market cap. No real market to sell into.`
+      : `Volume/market-cap ratio (${(volMcapRatio * 100).toFixed(2)}%) has dried up — there may be no real market left here.`;
   } else if (atRisk) {
     signal = 'AT RISK'; colorKey = 'trim';
     strength = 50;
-    reason = `Micro-cap (${formatINR(mcap)}${rank ? `, rank #${rank}` : ', unranked'}) with real survival risk. Not dead, so not an exit call — but not a place to add either.`;
+    reason = `Micro-cap (${formatINR(mcap)}${rank ? `, #${rank}` : ', unranked'}) — real survival risk. Not an exit call, but not a place to add either.`;
   } else if (athPct != null) {
     if (athPct <= DCA_EXTREME_PCT) {
       signal = 'WAIT'; colorKey = 'hold';
       strength = 20;
-      reason = `${depth.toFixed(0)}% below its all-time high — statistically extreme, but depth alone isn't a floor and isn't a buy signal. Checking below for a capital-efficient entry point.`;
+      reason = `${depth.toFixed(0)}% below ATH — extreme, but depth alone isn't a floor. Watching for a better entry.`;
     } else if (athPct <= DCA_DEEP_PCT) {
       signal = 'WAIT'; colorKey = 'hold';
       strength = 30;
-      reason = `${depth.toFixed(0)}% below its all-time high — deep discount, classic DCA territory by history, but discount alone doesn't confirm the fall has stopped. Checking below for a capital-efficient entry point.`;
+      reason = `${depth.toFixed(0)}% below ATH — deep discount, but that alone doesn't confirm the fall has stopped.`;
     } else if (athPct <= DCA_MODERATE_PCT) {
       signal = 'WAIT'; colorKey = 'hold';
       strength = 25;
-      reason = `${depth.toFixed(0)}% below its all-time high — a meaningful discount, but not yet a confirmed add. Checking below for a capital-efficient entry point.`;
+      reason = `${depth.toFixed(0)}% below ATH — meaningful discount, but not yet a confirmed add.`;
     } else if (athPct <= DCA_WATCH_PCT) {
       signal = 'HOLD'; colorKey = 'hold';
       strength = 35;
-      reason = `Only ${depth.toFixed(0)}% below its all-time high — not a deep enough discount yet to call this a DCA opportunity.`;
+      reason = `Only ${depth.toFixed(0)}% below ATH — not a deep enough discount yet.`;
     } else {
       signal = 'TRIM'; colorKey = 'trim';
       strength = 55;
-      reason = `Just ${depth.toFixed(0)}% below its all-time high — closer to a profit-taking zone than a buying one.`;
+      reason = `Just ${depth.toFixed(0)}% below ATH — closer to profit-taking than buying.`;
     }
   } else {
     signal = 'HOLD'; colorKey = 'hold';
     strength = 25;
-    reason = `No all-time-high data yet to judge whether this is a discount.`;
+    reason = `No ATH data yet to judge discount.`;
   }
 
   const atlWithinWindow = (atlDate && ta?.rollingLowWindowDays != null) ? daysSince(atlDate) <= ta.rollingLowWindowDays : false;
@@ -930,20 +934,21 @@ function classifyHolding(md, item, ta, macroTa) {
         if (gapCleared) {
           signal = 'ACCUMULATE'; colorKey = 'dca';
           strength = Math.round(Math.min(60, strength + 30) + relStrengthBonus);
-          const gapNote = lastLog == null ? '' : ` It's also ${gapPct.toFixed(1)}% below your last logged DCA (${formatINR(lastLog.price, pricePrecisionFor(lastLog.price))} on ${lastLog.dateStr}) — a materially better entry, not the same level again.`;
-          const streakNote = dcaStreakDay === 1 ? 'First flagged today.' : `First flagged ${dcaStreakDay} days ago and still holding — a continuation, not a new event.`;
-          reason = `${depth.toFixed(0)}% below its all-time high, ${aboveLow.toFixed(1)}% above its ${ta.rollingLowWindowDays}-day low, and RSI at ${liveRsi.toFixed(0)} (oversold) — every condition met together, not a reversal call, just a capital-efficient entry. ${streakNote}${gapNote}${relStrengthNote}`;
+          const gapNote = lastLog == null ? '' : ` Also ${gapPct.toFixed(1)}% below last DCA (${formatINR(lastLog.price, pricePrecisionFor(lastLog.price))}) — a real step down.`;
+          const streakNote = dcaStreakDay === 1 ? 'First flagged today.' : `Day ${dcaStreakDay} of this dip.`;
+          reason = `${depth.toFixed(0)}% below ATH, ${aboveLow.toFixed(1)}% above its ${ta.rollingLowWindowDays}d low, RSI ${liveRsi.toFixed(0)} (oversold) — conditions met. ${streakNote}${gapNote}${relStrengthNote}`;
         } else {
+          const nextDcaPrice = lastLog.price * (1 - dynGapPct / 100);
           const positionNote = gapPct >= 0
-            ? `price is only ${gapPct.toFixed(1)}% below your last logged DCA (${formatINR(lastLog.price, pricePrecisionFor(lastLog.price))} on ${lastLog.dateStr})`
-            : `price is actually ${Math.abs(gapPct).toFixed(1)}% above your last logged DCA (${formatINR(lastLog.price, pricePrecisionFor(lastLog.price))} on ${lastLog.dateStr}), not below it`;
-          reason = `Still meets every add condition — ${depth.toFixed(0)}% below its all-time high, near its ${ta.rollingLowWindowDays}-day low, RSI oversold at ${liveRsi.toFixed(0)} — day ${dcaStreakDay} of this dip. But ${positionNote}. This coin's own volatility calls for ≥${dynGapPct.toFixed(1)}% below that level before another add counts as a materially better entry, so it's held at WAIT to avoid stacking at nearly the same price.${relStrengthNote}`;
+            ? `only ${gapPct.toFixed(1)}% below last DCA (${formatINR(lastLog.price, pricePrecisionFor(lastLog.price))})`
+            : `${Math.abs(gapPct).toFixed(1)}% above last DCA (${formatINR(lastLog.price, pricePrecisionFor(lastLog.price))}), not below it`;
+          reason = `Still meets add conditions (day ${dcaStreakDay}), but ${positionNote}. Needs ≥${dynGapPct.toFixed(1)}% below that — next DCA near ${formatINR(nextDcaPrice, pricePrecisionFor(nextDcaPrice))}. Held at WAIT.${relStrengthNote}`;
         }
       } else {
         if (nearLow && !rsiOversold) {
-          reason = `${depth.toFixed(0)}% below its all-time high and near its ${ta.rollingLowWindowDays}-day low, but RSI (${liveRsi == null ? '—' : liveRsi.toFixed(0)}) isn't oversold yet — needs price, RSI, and near-low together to avoid firing on every minor dip.`;
+          reason = `${depth.toFixed(0)}% below ATH, near its ${ta.rollingLowWindowDays}d low, but RSI (${liveRsi == null ? '—' : liveRsi.toFixed(0)}) isn't oversold yet.`;
         } else {
-          reason = `${depth.toFixed(0)}% below its all-time high, but not near its ${ta.rollingLowWindowDays}-day low yet (currently ${Math.abs(aboveLow).toFixed(1)}% ${aboveLow >= 0 ? 'above' : 'below'} it) — only flags an add when price and RSI are both at an extreme together.`;
+          reason = `${depth.toFixed(0)}% below ATH, but ${Math.abs(aboveLow).toFixed(1)}% ${aboveLow >= 0 ? 'above' : 'below'} its ${ta.rollingLowWindowDays}d low — not near enough yet.`;
         }
       }
     } else {
@@ -1465,8 +1470,21 @@ function daysSince(dateStr) {
 }
 
 function handleRowExpansion(tr, item, forceReExpand = false) {
+  const collapsed = expandRowCore(tr, item, forceReExpand);
+  if (!forceReExpand && !collapsed) {
+    // A fixed delay (not rAF) so this survives the mobile browser's address-bar
+    // collapse on the very first scroll gesture of a page load — that collapse
+    // resizes the viewport mid-animation and can cancel a scroll timed too early
+    // via rAF, which is why this worked from the second click onward but not the first.
+    setTimeout(() => {
+      tr.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 150);
+  }
+}
+
+function expandRowCore(tr, item, forceReExpand) {
   const existing = document.querySelector(`.detail-row[data-for="${item.id}"]`);
-  if (existing && !forceReExpand) { existing.remove(); expandedRowId = null; return; }
+  if (existing && !forceReExpand) { existing.remove(); expandedRowId = null; return true; }
   if (!forceReExpand) document.querySelectorAll('.detail-row').forEach(r => r.remove());
   else if (existing) existing.remove();
 
@@ -1492,7 +1510,7 @@ function handleRowExpansion(tr, item, forceReExpand = false) {
     row.querySelector('.detail-remove-btn').onclick = () => removeCoin(item.id, item.symbol);
     row.querySelector('.chart-toggle-btn').onclick = (e) => toggleChart(item.id, item.symbol, e.currentTarget);
     expandedRowId = item.id;
-    return;
+    return false;
   }
 
   const ath = ta.isLiveAth ? 0 : daysSince(ta.athDate);
@@ -1555,7 +1573,7 @@ function handleRowExpansion(tr, item, forceReExpand = false) {
       <div class="detail-group-title">Technical Confirmation</div>
       <div class="detail-grid">
         <div class="detail-item"><div class="label">Conviction</div><div class="value">${ta.strength}%</div></div>
-        <div class="detail-item"><div class="label">RSI (14, live)</div><div class="value ${ta.rsi != null && ta.rsi <= RSI_OVERSOLD ? 'buy' : ta.rsi != null && ta.rsi >= RSI_OVERBOUGHT ? 'sell' : ''}">${ta.rsi == null ? '—' : ta.rsi.toFixed(0)}</div></div>
+        <div class="detail-item"><div class="label">RSI (14, live)</div><div class="value ${ta.rsi != null && ta.rsi <= RSI_OVERSOLD ? 'buy' : ta.rsi != null && ta.rsi >= RSI_OVERBOUGHT ? 'sell' : 'rsi-value'}">${ta.rsi == null ? '—' : ta.rsi.toFixed(0)}</div></div>
         <div class="detail-item"><div class="label">CMP → EMA 200 (live)</div><div class="value target-pct">${(ta.emaLong == null || ta.cmp == null) ? '—' : (((ta.emaLong - ta.cmp) / ta.cmp * 100) >= 0 ? '+' : '') + ((ta.emaLong - ta.cmp) / ta.cmp * 100).toFixed(1) + '% (' + formatINR(ta.emaLong, precision) + ')'}</div></div>
         <div class="detail-item">
           <div class="label">${ta.rollingLowWindowDays || DCA_DIP_WINDOW_DAYS}-Day Low${ta.isLiveLow ? ' <span>⚡</span>' : ''}</div>
@@ -1578,6 +1596,7 @@ function handleRowExpansion(tr, item, forceReExpand = false) {
   row.querySelector('.dca-log-btn')?.addEventListener('click', () => logDcaLevel(item.id, item.symbol));
   row.querySelector('.dca-log-clear-btn')?.addEventListener('click', () => clearDcaLevel(item.id, item.symbol));
   expandedRowId = item.id;
+  return false;
 }
 
 function applyCurrentSort() {
