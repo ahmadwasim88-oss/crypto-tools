@@ -197,7 +197,8 @@ td[data-col="coin"] { max-width: 44px; overflow: hidden; text-overflow: ellipsis
 .signal-badge.na { color: var(--muted-2); }
 .empty-row td { text-align: center; color: var(--muted-2); padding: 32px 12px; }
 .detail-row td { padding: 0; background: var(--panel-2); white-space: normal; }
-.detail-box { padding: 10px; }
+.detail-box { padding: 10px; transition: opacity 0.1s ease; touch-action: pan-y; }
+.detail-box.swipe-out { opacity: 0.3; }
 .detail-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -1383,6 +1384,58 @@ document.addEventListener('click', (e) => {
   e.stopPropagation();
   beginTargetEdit(e.target);
 });
+
+// Swipe left/right on an expanded detail box to jump to the next/previous
+// coin in the currently sorted list, without collapsing back to the table.
+const SWIPE_MIN_DX = 50;
+const SWIPE_EDGE_EXCLUDE_PX = 24; // avoid fighting the browser's edge back/forward gesture
+let swipeState = null;
+
+tableBody.addEventListener('touchstart', (e) => {
+  const box = e.target.closest('.detail-box');
+  if (!box) return;
+  if (e.target.closest('button, a, input')) return;
+  const t = e.touches[0];
+  if (t.clientX < SWIPE_EDGE_EXCLUDE_PX || t.clientX > window.innerWidth - SWIPE_EDGE_EXCLUDE_PX) return;
+  swipeState = { box, startX: t.clientX, startY: t.clientY, dx: 0, dy: 0 };
+}, { passive: true });
+
+tableBody.addEventListener('touchmove', (e) => {
+  if (!swipeState) return;
+  const t = e.touches[0];
+  swipeState.dx = t.clientX - swipeState.startX;
+  swipeState.dy = t.clientY - swipeState.startY;
+}, { passive: true });
+
+tableBody.addEventListener('touchend', () => {
+  if (!swipeState) return;
+  const { box, dx, dy } = swipeState;
+  swipeState = null;
+  if (Math.abs(dx) < SWIPE_MIN_DX || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+  navigateExpandedRow(dx < 0 ? 1 : -1, box);
+});
+
+function navigateExpandedRow(direction, box) {
+  if (!expandedRowId) return;
+  const rows = Array.from(tableBody.querySelectorAll('tr.main-row'));
+  const idx = rows.findIndex(r => r.dataset.id === expandedRowId);
+  if (idx === -1 || rows.length < 2) return;
+  const nextIdx = (idx + direction + rows.length) % rows.length;
+  const nextTr = rows[nextIdx];
+  const nextItem = portfolioMap[nextTr.dataset.id];
+  if (!nextTr || !nextItem) return;
+
+  if (box) {
+    box.classList.add('swipe-out');
+    setTimeout(() => {
+      expandRowCore(nextTr, nextItem, false);
+      nextTr.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 90);
+  } else {
+    expandRowCore(nextTr, nextItem, false);
+    nextTr.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
 
 function renderTable() {
   if (saved.length === 0) {
