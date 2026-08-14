@@ -29,7 +29,7 @@
       padding: 10px;
     }
     
-    content {
+    .content {
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -39,13 +39,20 @@
     
     h1 {
       color: #333;
-      font-size: calc(1.8rem+1vw);
+      font-size: calc(1.8rem + 1vw);
     }
     
     p {
       margin-bottom: 24px;
       color: #666;
-      font-size: calc(0.9rem+0.5vw);
+      font-size: calc(0.9rem + 0.5vw);
+    }
+
+    #elapsedSince {
+      margin-top: -14px;
+      margin-bottom: 24px;
+      font-size: 0.8rem;
+      color: #888;
     }
     
     .button-container {
@@ -61,7 +68,7 @@
       background: linear-gradient(135deg, #6a11cb, #2575fc);
       color: white;
       border-radius: 12px;
-      font-size: calc(0.9rem+0.3vw);
+      font-size: calc(0.9rem + 0.3vw);
       font-weight: 600;
       box-shadow: 0 6px 12px rgba(0, 0, 0, 0.1);
       transition: all 0.3s ease;
@@ -205,6 +212,26 @@
       opacity: 0.9;
       color: #fff;
     }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .form-error {
+      font-size: 0.7rem;
+      color: #ffd7d7;
+      min-height: 1em;
+      margin-top: 2px;
+      text-align: left;
+    }
   </style>
 </head>
 
@@ -213,15 +240,13 @@
   <div class="content">
     <h1>Tool Dashboard</h1>
     <p>Select a tool below to open:</p>
+    <p id="elapsedSince">—</p>
     <div class="button-container">
       <a href="Portfolio Tracker.html">Portfolio Tracker</a>
       <a href="Scanner.html">Crypto Scanner</a>
-      
       <a href="CrytoCal.html">CrytoCal</a>
       <a href="Percentage Calculators.html">Percentage Calculators</a>
       <a href="ohlcv.html">OHLCV</a>
-      
-      
     </div>
   </div>
   
@@ -238,8 +263,11 @@
   <div class="card" id="card">
     <div class="edit" id="editBtn">✏️</div>
     <div id="settings">
+      <label for="birth" class="sr-only">Birthdate</label>
       <input type="date" id="birth" placeholder="Birthdate">
+      <label for="age" class="sr-only">Target Age</label>
       <input type="number" id="age" value="75" placeholder="Target Age">
+      <div id="formError" class="form-error"></div>
       <button id="save">Save</button>
     </div>
     <div id="widget">
@@ -267,79 +295,125 @@
       percentMini = document.getElementById("percentMini"),
       editBtn = document.getElementById("editBtn"),
       bInput = document.getElementById("birth"),
-      aInput = document.getElementById("age");
+      aInput = document.getElementById("age"),
+      formError = document.getElementById("formError");
     
     let collapsed = true;
-    
+    let intervalId = null;
+    let widgetActive = false; // true once a valid birthdate/age has been loaded or saved
+
+    function startTicking() {
+      if (intervalId) clearInterval(intervalId);
+      intervalId = setInterval(update, 1000);
+    }
+
+    function stopTicking() {
+      if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+    }
+
+    // Pause the 1s tick while the tab isn't visible; resume (and catch up) when it is again
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        stopTicking();
+      } else if (widgetActive) {
+        update();
+        startTicking();
+      }
+    });
+
+    // Returns an error message string, or null if the inputs are valid
+    function validateInputs(birthStr, ageStr) {
+      if (!birthStr || !ageStr) return "Please fill in both fields.";
+
+      const birth = new Date(birthStr);
+      if (isNaN(birth.getTime())) return "Enter a valid birthdate.";
+
+      const endOfToday = new Date();
+      endOfToday.setHours(23, 59, 59, 999);
+      if (birth > endOfToday) return "Birthdate can't be in the future.";
+
+      const age = Number(ageStr);
+      if (!Number.isFinite(age) || age <= 0) return "Target age must be greater than 0.";
+      if (age > 130) return "Target age seems unrealistic — try a lower number.";
+
+      return null;
+    }
+
+    const MS = { SEC: 1000, MIN: 60 * 1000, HOUR: 3600 * 1000, DAY: 24 * 3600 * 1000 };
+    MS.YEAR_APPROX = 365.25 * MS.DAY;
+    MS.MONTH_APPROX = 30 * MS.DAY;
+
+    // Breaks a millisecond duration into y/m/d/h/m/s (approximate, calendar-agnostic).
+    // Used for the two countdown-style displays where sub-day precision matters.
+    function breakdownDuration(ms) {
+      const years = Math.floor(ms / MS.YEAR_APPROX); ms -= years * MS.YEAR_APPROX;
+      const months = Math.floor(ms / MS.MONTH_APPROX); ms -= months * MS.MONTH_APPROX;
+      const days = Math.floor(ms / MS.DAY); ms -= days * MS.DAY;
+      const hours = Math.floor(ms / MS.HOUR); ms -= hours * MS.HOUR;
+      const mins = Math.floor(ms / MS.MIN); ms -= mins * MS.MIN;
+      const secs = Math.floor(ms / MS.SEC);
+      return { years, months, days, hours, mins, secs };
+    }
+
+    function formatYMDHMS({ years, months, days, hours, mins, secs }) {
+      return `${years}y ${months}m ${days}d ${hours}h ${mins}m ${secs}s`;
+    }
+
+    // Calendar-accurate elapsed time (no drift, unlike breakdownDuration above) —
+    // used only for the fixed "Since 17 Apr 2021" label.
+    function getElapsedYMD(fromDate, toDate) {
+      let years = toDate.getFullYear() - fromDate.getFullYear();
+      let months = toDate.getMonth() - fromDate.getMonth();
+      let days = toDate.getDate() - fromDate.getDate();
+
+      if (days < 0) {
+        months--;
+        const prevMonth = new Date(toDate.getFullYear(), toDate.getMonth(), 0);
+        days += prevMonth.getDate();
+      }
+      if (months < 0) {
+        years--;
+        months += 12;
+      }
+      return { years, months, days };
+    }
+
+    function updateElapsedSince() {
+      const from = new Date(2021, 3, 17); // 17 April 2021 (month is 0-indexed)
+      const { years, months, days } = getElapsedYMD(from, new Date());
+      document.getElementById("elapsedSince").textContent =
+        `Since 17 Apr 2021: ${years}y ${months}m ${days}d`;
+    }
+    updateElapsedSince();
+    setInterval(updateElapsedSince, 60 * 1000); // day-granularity, no need to tick every second
+
     function update() {
       if (!bInput.value) return;
-      
+
       const birth = new Date(bInput.value),
         targetAge = parseInt(aInput.value),
         now = new Date(),
         end = new Date(bInput.value);
-      
+
       end.setFullYear(end.getFullYear() + targetAge);
-      
+
       const total = end - birth,
         lived = now - birth,
         completed = Math.min(100, (lived / total * 100)),
         remaining = Math.max(0, (100 - completed).toFixed(1));
-      
+
       fill.style.width = completed + "%";
       percentBar.textContent = remaining + "% remaining";
       deathDateEl.textContent = "DoD: " + end.toDateString();
-      
-      /* ===========================
-         FULL TIME PASSED (REPLACES DAYS)
-         =========================== */
-      let livedMs = lived;
-      
-      const pYears = Math.floor(livedMs / (365.25 * 24 * 3600 * 1000));
-      livedMs -= pYears * 365.25 * 24 * 3600 * 1000;
-      
-      const pMonths = Math.floor(livedMs / (30 * 24 * 3600 * 1000));
-      livedMs -= pMonths * 30 * 24 * 3600 * 1000;
-      
-      const pDays = Math.floor(livedMs / (24 * 3600 * 1000));
-      livedMs -= pDays * 24 * 3600 * 1000;
-      
-      const pHours = Math.floor(livedMs / (3600 * 1000));
-      livedMs -= pHours * 3600 * 1000;
-      
-      const pMins = Math.floor(livedMs / (60 * 1000));
-      livedMs -= pMins * 60 * 1000;
-      
-      const pSecs = Math.floor(livedMs / 1000);
-      
-      daysPassedEl.textContent =
-        `Passed: ${pYears}y ${pMonths}m ${pDays}d ${pHours}h ${pMins}m ${pSecs}s`;
-      
-      /* =========================== */
-      
-      let diff = end - now;
-      if (diff < 0) diff = 0;
-      
-      const years = Math.floor(diff / (365.25 * 24 * 3600 * 1000));
-      diff -= years * 365.25 * 24 * 3600 * 1000;
-      
-      const months = Math.floor(diff / (30 * 24 * 3600 * 1000));
-      diff -= months * 30 * 24 * 3600 * 1000;
-      
-      const days = Math.floor(diff / (24 * 3600 * 1000));
-      diff -= days * 24 * 3600 * 1000;
-      
-      const hours = Math.floor(diff / (3600 * 1000));
-      diff -= hours * 3600 * 1000;
-      
-      const mins = Math.floor(diff / (60 * 1000));
-      diff -= mins * 60 * 1000;
-      
-      const secs = Math.floor(diff / 1000);
-      
-      countdown.textContent =
-        `Left: ${years}y ${months}m ${days}d ${hours}h ${mins}m ${secs}s`;
-      
+
+      daysPassedEl.textContent = "Passed: " + formatYMDHMS(breakdownDuration(lived));
+
+      const remainingMs = Math.max(0, end - now);
+      countdown.textContent = "Left: " + formatYMDHMS(breakdownDuration(remainingMs));
+
       if (collapsed) {
         mini.style.display = "flex";
         const circumference = 2 * Math.PI * 27;
@@ -348,37 +422,51 @@
         percentMini.textContent = remaining + "%";
       }
     }
-    
-    // Load saved
-    if (localStorage.birth && localStorage.age) {
-      bInput.value = localStorage.birth;
-      aInput.value = localStorage.age;
-      settings.style.display = 'none';
-      widget.style.display = 'none';
-      mini.style.display = 'flex';
-      collapsed = true;
-      update();
-      setInterval(update, 1000);
+
+    // Load saved (wrapped: localStorage can throw in some private-browsing modes)
+    try {
+      if (localStorage.birth && localStorage.age && !validateInputs(localStorage.birth, localStorage.age)) {
+        bInput.value = localStorage.birth;
+        aInput.value = localStorage.age;
+        settings.style.display = 'none';
+        widget.style.display = 'none';
+        mini.style.display = 'flex';
+        collapsed = true;
+        widgetActive = true;
+        update();
+        startTicking();
+      }
+    } catch (err) {
+      console.warn("Couldn't read saved widget settings:", err);
     }
-    
+
     // Save
     document.getElementById("save").addEventListener("click", (e) => {
       e.stopPropagation();
-      if (!bInput.value || !aInput.value) return;
-      localStorage.birth = bInput.value;
-      localStorage.age = aInput.value;
+      const error = validateInputs(bInput.value, aInput.value);
+      formError.textContent = error || "";
+      if (error) return;
+
+      try {
+        localStorage.birth = bInput.value;
+        localStorage.age = aInput.value;
+      } catch (err) {
+        console.warn("Couldn't persist widget settings:", err);
+      }
       settings.style.display = 'none';
       widget.style.display = 'block';
       mini.style.display = 'none';
       editBtn.style.display = 'block';
       collapsed = false;
+      widgetActive = true;
       update();
-      setInterval(update, 1000);
+      startTicking();
     });
     
     // Edit
     editBtn.addEventListener("click", (e) => {
       e.stopPropagation();
+      formError.textContent = "";
       settings.style.display = 'block';
       widget.style.display = 'none';
       mini.style.display = 'none';
@@ -403,6 +491,17 @@
         mini.style.display = 'flex';
         editBtn.style.display = 'none';
       }
+    });
+
+    // Collapse when clicking anywhere outside the widget
+    document.addEventListener("click", (e) => {
+      if (collapsed) return;                              // already collapsed
+      if (settings.style.display === 'block') return;      // don't interrupt editing
+      if (card.contains(e.target) || mini.contains(e.target)) return; // click was inside widget
+      collapsed = true;
+      card.style.display = 'none';
+      mini.style.display = 'flex';
+      editBtn.style.display = 'none';
     });
   </script>
 </body>
