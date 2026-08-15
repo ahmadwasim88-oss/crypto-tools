@@ -178,7 +178,6 @@ td[data-col="coin"] { max-width: 44px; overflow: hidden; text-overflow: ellipsis
 .gain-pos { color: var(--buy); font-weight: 600; }
 .gain-neg { color: var(--sell); font-weight: 600; }
 .gain-na { color: var(--muted-2); }
-.price-full { display: inline; }
 .price-change-24h { display: block; font-size: 9px; font-weight: 600; margin-top: 1px; line-height: 1.1; }
 .signal-cell { min-width: 0; }
 .signal-wrap { display: flex; align-items: center; justify-content: center; gap: 8px; }
@@ -1325,7 +1324,7 @@ function priceCellHTML(id, cur) {
   if (!cur) return '<span class="gain-na">—</span>';
   const chg24h = marketDataCache[id]?.change_24h;
   const chgHtml = chg24h == null ? '' : `<span class="price-change-24h ${chg24h >= 0 ? 'gain-pos' : 'gain-neg'}">${formatPct(chg24h)}</span>`;
-  return `<span class="price-full">${formatINR(cur, pricePrecisionFor(cur), true)}</span>${chgHtml}`;
+  return `${formatINR(cur, pricePrecisionFor(cur), true)}${chgHtml}`;
 }
 
 function targetCellHTML(item) {
@@ -1458,10 +1457,10 @@ function renderTable() {
       <td data-col="coin">
         <div class="coin-name">${item.symbol}</div>
       </td>
-      <td class="numeric price-cell" data-id="${item.id}" data-col="price" data-label="Price">${priceCellHTML(item.id, cur)}</td>
-      <td class="numeric" data-col="target" data-label="Target">${targetCellHTML(item)}</td>
-      <td class="numeric gain-cell ${gain == null ? 'gain-na' : gain >= 0 ? 'gain-pos' : 'gain-neg'}" data-col="gain" data-label="To target">${formatPct(gain)}</td>
-      <td class="center signal-cell" data-col="signal" data-label="Signal">${signalHtml}</td>
+      <td class="numeric price-cell" data-id="${item.id}">${priceCellHTML(item.id, cur)}</td>
+      <td class="numeric">${targetCellHTML(item)}</td>
+      <td class="numeric gain-cell ${gain == null ? 'gain-na' : gain >= 0 ? 'gain-pos' : 'gain-neg'}">${formatPct(gain)}</td>
+      <td class="center signal-cell">${signalHtml}</td>
     `;
 
     tr.onclick = (e) => {
