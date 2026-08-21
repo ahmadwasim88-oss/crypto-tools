@@ -371,6 +371,17 @@ td[data-col="coin"] { max-width: 44px; overflow: hidden; text-overflow: ellipsis
 .status-line.warn span#statusLineText { color: var(--trim); }
 .status-line.error .sl-dot { background: var(--sell); box-shadow: 0 0 6px rgba(255,92,114,0.6); }
 .status-line.error span#statusLineText { color: var(--sell); }
+
+.discover-section { padding: 12px 14px 16px; }
+.discover-section > button { width: 100%; background: var(--panel-2); color: var(--dca); border: 1px solid rgba(34,193,217,0.35); }
+.discover-section > button:disabled { color: var(--muted); border-color: var(--border); }
+.discover-card { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-top: 10px; background: var(--panel); }
+.discover-card .dc-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.discover-card .dc-symbol { font-weight: 700; }
+.discover-card .dc-name { color: var(--muted); font-size: 12px; margin-left: 6px; }
+.discover-card .dc-add { padding: 4px 10px; font-size: 13px; }
+.discover-card .dc-reason { color: var(--muted); font-size: 12px; margin-top: 6px; line-height: 1.4; }
+.discover-empty { color: var(--muted); font-size: 13px; padding: 10px 2px; }
 </style>
 </head>
 <body>
@@ -408,6 +419,11 @@ td[data-col="coin"] { max-width: 44px; overflow: hidden; text-overflow: ellipsis
 </table>
 </div>
 
+<div class="discover-section">
+  <button id="discoverBtn">Find candidates not in my list</button>
+  <div id="discoverResults"></div>
+</div>
+
 </div>
 
 <div id="activityLogContainer" class="activity-log-container">
@@ -430,6 +446,8 @@ const suggestBox      = document.getElementById('suggestBox');
 const gainSortArrow   = document.getElementById('gainSortArrow');
 const signalSortArrow = document.getElementById('signalSortArrow');
 const priceSortArrow  = document.getElementById('priceSortArrow');
+const discoverBtn     = document.getElementById('discoverBtn');
+const discoverResults = document.getElementById('discoverResults');
 
 const API_KEY = 'CG-G1MtEv33nwCgRyvF4YNsKyDs';
 const API_BASE = 'https://api.coingecko.com/api/v3';
@@ -455,7 +473,7 @@ const DCA_EXTREME_PCT = -85;
 const DCA_DEEP_PCT = -70;
 const DCA_MODERATE_PCT = -40;
 const DCA_DIP_WINDOW_DAYS = 90;
-const DCA_DIP_NEAR_PCT = 3;
+const DCA_DIP_NEAR_PCT = 3; // fallback only, used before any TA history is loaded — see nearLowThresholdPct
 const DCA_VOL_LOOKBACK_DAYS = 20; // used to scale the gap gate to each coin's own volatility
 const DCA_GAP_MULT = 3.0;
 const DCA_GAP_FLOOR_PCT = 5;
@@ -469,18 +487,57 @@ const DCA_WATCH_PCT = -20;
 
 const CRASH_7D_PCT = -15;
 
+// Fixed % bands assume every coin oscillates the same amount, which isn't true — a calm coin can
+// sit within a tight range of its low for days, while a choppy one is rarely within a wide band
+// without already reversing; same story for how deep a "normal" vs "extreme" ATH drawdown is.
+// Both are instead scaled by each coin's own trailing daily-move average (DCA_VOL_LOOKBACK_DAYS),
+// relative to VOL_SCALE_REF_PCT — a rough large-cap daily-swing baseline the DCA_* constants above
+// were originally calibrated against — clamped so an illiquid/outlier reading can't blow them out.
+const VOL_SCALE_REF_PCT = 3;
+const VOL_SCALE_MIN = 0.6;
+const VOL_SCALE_MAX = 1.8;
+const ATH_TIER_ABS_FLOOR_PCT = -95; // beyond this a coin's likely dead/delisted, not "still watching"
+const ATH_TIER_ABS_CEIL_PCT = -12;  // watch tier shouldn't fire this close to ATH even for a very calm coin
+const DCA_NEAR_LOW_MULT = 1.0;
+const DCA_NEAR_LOW_FLOOR_PCT = 1.5;
+const DCA_NEAR_LOW_CEIL_PCT = 8;
+
 const TA_ALIGN_BUFFER_MS = 15 * 60000;
 const TA_HISTORY_DAYS = 365;
 const TA_FETCH_DELAY_MS = 1500;
 
 const RSI_PERIOD = 14;
-const RSI_OVERSOLD = 30;
+const RSI_OVERSOLD = 30; // fallback only, used when a coin lacks enough RSI history for its own threshold
 const RSI_OVERBOUGHT = 70;
 const ATL_PROXIMITY_PCT = 10;
+// Not every coin's RSI oscillates through the same range — low-volatility coins (often BTC
+// itself) can bottom at RSI 35-40 and never print sub-30, while high-beta alts blow through 20.
+// A single fixed cutoff misses the first group's real bottoms and is loose for the second. So
+// "oversold" is instead defined per coin: the ~15th percentile of its OWN RSI history (i.e. where
+// this specific coin's RSI has actually spent time before, historically, near past bottoms).
+const RSI_OVERSOLD_PERCENTILE = 15;
+const RSI_OVERSOLD_MIN_SAMPLES = 60; // need a reasonable amount of RSI history before trusting a per-coin threshold
+const RSI_OVERSOLD_FLOOR = 20; // sanity bounds so thin/erratic history can't produce a pointlessly strict or loose threshold
+const RSI_OVERSOLD_CEIL = 45;
+
+function percentileOf(sortedAsc, pct) {
+  if (!sortedAsc || !sortedAsc.length) return null;
+  const idx = Math.floor((pct / 100) * (sortedAsc.length - 1));
+  return sortedAsc[idx];
+}
+
+// Discover: scans coins NOT already in the portfolio for the same ACCUMULATE conditions.
+// Two-stage to stay within CoinGecko free-tier limits: stage 1 is one cheap /coins/markets call
+// across DISCOVER_TOP_N by market cap, prefiltered on ath_change_percentage (already in that
+// response, no extra calls) down to a short list; only that short list gets the expensive
+// per-coin daily-history fetch (stage 2, same fetchTaHistory used for the portfolio), capped at
+// DISCOVER_MAX_TA_FETCHES so an on-demand scan can't trigger 100+ sequential history calls.
+const DISCOVER_TOP_N = 150;
+const DISCOVER_MAX_TA_FETCHES = 25;
 
 const EMA_TREND_LONG = 200;
 
-const TA_LOGIC_VERSION = 11;
+const TA_LOGIC_VERSION = 13; // bumped: volatility-scaled near-low band and ATH tiers added
 const TA_FETCH_VERSION = 2;
 
 let saved             = JSON.parse(localStorage.getItem('shortfall_portfolio') || '[]');
@@ -640,10 +697,12 @@ function calcAvgDailyMovePct(closes, days) {
 // the ATL-merge refinement `effectiveLow` applies for today — that only matters in the rare case
 // of an ATL older than 90 days that's still the coin's lowest daily close, and isn't reconstructable
 // per historical day without full ATL history, so it's left out of this backward walk.
-function reconstructStreakDays(closes, cur) {
+function reconstructStreakDays(closes, cur, rsiThreshold, nearLowThresholdPct) {
   if (!closes || !closes.length || cur == null) return 1;
   const series = closes.concat([cur]);
   const rsiSeries = calcRSISeries(series, RSI_PERIOD);
+  const threshold = rsiThreshold ?? RSI_OVERSOLD;
+  const nearLowPct = nearLowThresholdPct ?? DCA_DIP_NEAR_PCT;
   let streak = 0;
   for (let i = series.length - 1; i >= 0; i--) {
     const rsi = rsiSeries[i];
@@ -654,7 +713,7 @@ function reconstructStreakDays(closes, cur) {
       if (series[j] < low) low = series[j];
     }
     const aboveLow = ((series[i] - low) / low) * 100;
-    const atLowThatDay = aboveLow <= DCA_DIP_NEAR_PCT && rsi <= RSI_OVERSOLD;
+    const atLowThatDay = aboveLow <= nearLowPct && rsi <= threshold;
     if (!atLowThatDay) break;
     streak++;
   }
@@ -671,8 +730,34 @@ function computeTaFromCloses(closes) {
   // in-progress point is dropped by fetchTaHistory) — so days-ago counts back from that index.
   const rollingLowIndex = dipWindowCloses.length ? dipWindowCloses.indexOf(rollingLow) : -1;
   const rollingLowDaysAgo = rollingLowIndex >= 0 ? (dipWindowCloses.length - rollingLowIndex) : null;
+  const validRsi = rsiSeries.filter(v => v != null && !isNaN(v));
+  let rsiOversoldThreshold = RSI_OVERSOLD;
+  if (validRsi.length >= RSI_OVERSOLD_MIN_SAMPLES) {
+    const sortedRsi = [...validRsi].sort((a, b) => a - b);
+    const p = percentileOf(sortedRsi, RSI_OVERSOLD_PERCENTILE);
+    if (p != null) rsiOversoldThreshold = Math.min(RSI_OVERSOLD_CEIL, Math.max(RSI_OVERSOLD_FLOOR, p));
+  }
+  const avgDailyMove = calcAvgDailyMovePct(closes, DCA_VOL_LOOKBACK_DAYS);
+  const volScale = avgDailyMove != null
+    ? Math.max(VOL_SCALE_MIN, Math.min(VOL_SCALE_MAX, avgDailyMove / VOL_SCALE_REF_PCT))
+    : 1;
+  const nearLowThresholdPct = Math.max(
+    DCA_NEAR_LOW_FLOOR_PCT,
+    Math.min(DCA_NEAR_LOW_CEIL_PCT, (avgDailyMove ?? DCA_NEAR_LOW_FLOOR_PCT) * DCA_NEAR_LOW_MULT)
+  );
+  const clampTier = base => Math.max(ATH_TIER_ABS_FLOOR_PCT, Math.min(ATH_TIER_ABS_CEIL_PCT, base * volScale));
+  const athTiers = {
+    extreme: clampTier(DCA_EXTREME_PCT),
+    deep: clampTier(DCA_DEEP_PCT),
+    moderate: clampTier(DCA_MODERATE_PCT),
+    watch: clampTier(DCA_WATCH_PCT)
+  };
   return {
     rsi: rsiSeries.length ? rsiSeries[rsiSeries.length - 1] : null,
+    rsiOversoldThreshold,
+    avgDailyMove,
+    nearLowThresholdPct,
+    athTiers,
     emaLong: emaLongSeries.length ? emaLongSeries[emaLongSeries.length - 1] : null,
     rollingLow,
     rollingLowDaysAgo,
@@ -704,7 +789,8 @@ async function fetchTaHistory(id) {
 
 function auditTa(ta) {
   if (!ta) return true;
-  const fields = [ta.rsi, ta.emaLong, ta.rollingLow];
+  const fields = [ta.rsi, ta.emaLong, ta.rollingLow, ta.rsiOversoldThreshold, ta.nearLowThresholdPct,
+    ta.athTiers?.extreme, ta.athTiers?.deep, ta.athTiers?.moderate, ta.athTiers?.watch];
   return fields.every(v => v == null || !isNaN(v));
 }
 
@@ -846,6 +932,7 @@ function classifyHolding(md, item, ta, macroTa) {
 
   let signal, colorKey, strength, reason;
   const depth = athPct != null ? Math.abs(athPct) : null;
+  const athTiers = ta?.athTiers ?? { extreme: DCA_EXTREME_PCT, deep: DCA_DEEP_PCT, moderate: DCA_MODERATE_PCT, watch: DCA_WATCH_PCT };
 
   if (deadLiquidity) {
     signal = 'EXIT'; colorKey = 'sell';
@@ -862,19 +949,19 @@ function classifyHolding(md, item, ta, macroTa) {
     strength = 50;
     reason = `Micro-cap (${formatINR(mcap)}${rank ? `, #${rank}` : ', unranked'}) — real survival risk. Not an exit call, but not a place to add either.`;
   } else if (athPct != null) {
-    if (athPct <= DCA_EXTREME_PCT) {
+    if (athPct <= athTiers.extreme) {
       signal = 'WAIT'; colorKey = 'hold';
       strength = 20;
       reason = `${depth.toFixed(0)}% below ATH — extreme, but depth alone isn't a floor. Watching for a better entry.`;
-    } else if (athPct <= DCA_DEEP_PCT) {
+    } else if (athPct <= athTiers.deep) {
       signal = 'WAIT'; colorKey = 'hold';
       strength = 30;
       reason = `${depth.toFixed(0)}% below ATH — deep discount, but that alone doesn't confirm the fall has stopped.`;
-    } else if (athPct <= DCA_MODERATE_PCT) {
+    } else if (athPct <= athTiers.moderate) {
       signal = 'WAIT'; colorKey = 'hold';
       strength = 25;
       reason = `${depth.toFixed(0)}% below ATH — meaningful discount, but not yet a confirmed add.`;
-    } else if (athPct <= DCA_WATCH_PCT) {
+    } else if (athPct <= athTiers.watch) {
       signal = 'HOLD'; colorKey = 'hold';
       strength = 35;
       reason = `Only ${depth.toFixed(0)}% below ATH — not a deep enough discount yet.`;
@@ -916,12 +1003,14 @@ function classifyHolding(md, item, ta, macroTa) {
 
     if (ta && ta.rollingLow != null && cur != null) {
       const aboveLow = (cur - effectiveLow) / effectiveLow * 100;
-      const nearLow = aboveLow <= DCA_DIP_NEAR_PCT;
-      const rsiOversold = liveRsi != null && liveRsi <= RSI_OVERSOLD;
-      const avgDailyMove = calcAvgDailyMovePct(ta.closes, DCA_VOL_LOOKBACK_DAYS);
+      const nearLowThresholdPct = ta.nearLowThresholdPct ?? DCA_DIP_NEAR_PCT;
+      const nearLow = aboveLow <= nearLowThresholdPct;
+      const rsiThreshold = ta.rsiOversoldThreshold ?? RSI_OVERSOLD;
+      const rsiOversold = liveRsi != null && liveRsi <= rsiThreshold;
+      const avgDailyMove = ta.avgDailyMove ?? null;
       const atLow = nearLow && rsiOversold;
       if (atLow) {
-        dcaStreakDay = reconstructStreakDays(ta.closes, cur);
+        dcaStreakDay = reconstructStreakDays(ta.closes, cur, rsiThreshold, nearLowThresholdPct);
 
         const lastLog = dcaLogCache[item.id] ?? null;
         const dynGapPct = Math.max(
@@ -936,7 +1025,7 @@ function classifyHolding(md, item, ta, macroTa) {
           strength = Math.round(Math.min(60, strength + 30) + relStrengthBonus);
           const gapNote = lastLog == null ? '' : ` Also ${gapPct.toFixed(1)}% below last DCA (${formatINR(lastLog.price, pricePrecisionFor(lastLog.price))}) — a real step down.`;
           const streakNote = dcaStreakDay === 1 ? 'First flagged today.' : `Day ${dcaStreakDay} of this dip.`;
-          reason = `${depth.toFixed(0)}% below ATH, ${aboveLow.toFixed(1)}% above its ${ta.rollingLowWindowDays}d low, RSI ${liveRsi.toFixed(0)} (oversold) — conditions met. ${streakNote}${gapNote}${relStrengthNote}`;
+          reason = `${depth.toFixed(0)}% below ATH, ${aboveLow.toFixed(1)}% above its ${ta.rollingLowWindowDays}d low (within this coin's own ≤${nearLowThresholdPct.toFixed(1)}% band), RSI ${liveRsi.toFixed(0)} (oversold vs this coin's own ≤${rsiThreshold.toFixed(0)} bottom zone) — conditions met. ${streakNote}${gapNote}${relStrengthNote}`;
         } else {
           const nextDcaPrice = lastLog.price * (1 - dynGapPct / 100);
           const positionNote = gapPct >= 0
@@ -946,9 +1035,9 @@ function classifyHolding(md, item, ta, macroTa) {
         }
       } else {
         if (nearLow && !rsiOversold) {
-          reason = `${depth.toFixed(0)}% below ATH, near its ${ta.rollingLowWindowDays}d low, but RSI (${liveRsi == null ? '—' : liveRsi.toFixed(0)}) isn't oversold yet.`;
+          reason = `${depth.toFixed(0)}% below ATH, near its ${ta.rollingLowWindowDays}d low, but RSI (${liveRsi == null ? '—' : liveRsi.toFixed(0)}) hasn't reached this coin's own oversold zone (≤${rsiThreshold.toFixed(0)}) yet.`;
         } else {
-          reason = `${depth.toFixed(0)}% below ATH, but ${Math.abs(aboveLow).toFixed(1)}% ${aboveLow >= 0 ? 'above' : 'below'} its ${ta.rollingLowWindowDays}d low — not near enough yet.`;
+          reason = `${depth.toFixed(0)}% below ATH, but ${Math.abs(aboveLow).toFixed(1)}% ${aboveLow >= 0 ? 'above' : 'below'} its ${ta.rollingLowWindowDays}d low — outside this coin's own ≤${nearLowThresholdPct.toFixed(1)}% near-low band.`;
         }
       }
     } else {
@@ -968,6 +1057,9 @@ function classifyHolding(md, item, ta, macroTa) {
     volume, mcap, rank, athPct, athValue, athDate, atlValue, atlDate, isLiveAth, isLiveAtl, low24h, high24h, volMcapRatio,
     change24h: md.change_24h, change7d: md.change_7d, change30d: md.change_30d,
     rsi: liveRsi,
+    rsiOversoldThreshold: ta?.rsiOversoldThreshold ?? RSI_OVERSOLD,
+    nearLowThresholdPct: ta?.nearLowThresholdPct ?? DCA_DIP_NEAR_PCT,
+    athTiers,
     emaLong: liveEmaLong,
     rollingLow: ta?.rollingLow ?? null,
     effectiveLow,
@@ -1575,7 +1667,7 @@ function expandRowCore(tr, item, forceReExpand) {
     ? Math.max(0, Math.min(100, (ta.cmp - barLow) / (barHigh - barLow) * 100))
     : 50;
   const atlIsCheap = pctAboveAtl != null && pctAboveAtl <= ATL_PROXIMITY_PCT;
-  const lowIsNear = (ta.effectiveLow != null && ta.cmp != null) && ((ta.cmp - ta.effectiveLow) / ta.effectiveLow * 100) <= DCA_DIP_NEAR_PCT;
+  const lowIsNear = (ta.effectiveLow != null && ta.cmp != null) && ((ta.cmp - ta.effectiveLow) / ta.effectiveLow * 100) <= (ta.nearLowThresholdPct ?? DCA_DIP_NEAR_PCT);
   const lastLog = dcaLogCache[item.id] ?? null;
   const showLogAction = ta.signal === 'ACCUMULATE';
   const dcaLogHtml = (!showLogAction && !lastLog) ? '' : `
@@ -1604,8 +1696,8 @@ function expandRowCore(tr, item, forceReExpand) {
         <div class="detail-item"><div class="label">30-Day Change</div><div class="value">${ta.change30d == null ? '—' : (ta.change30d >= 0 ? '+' : '') + ta.change30d.toFixed(1) + '%'}</div></div>
         <div class="detail-item">
           <div class="label">All-Time High${ta.isLiveAth ? ' <span>⚡</span>' : ''}</div>
-          <div class="value ${ta.athPct != null && ta.athPct <= DCA_MODERATE_PCT ? 'buy' : ta.athPct != null && ta.athPct > DCA_WATCH_PCT ? 'sell' : ''}">${ta.athValue == null ? '—' : formatINR(ta.athValue, precision)}</div>
-          <div class="sub-value ${ta.athPct != null && ta.athPct <= DCA_MODERATE_PCT ? 'buy' : ta.athPct != null && ta.athPct > DCA_WATCH_PCT ? 'sell' : ''}">${ta.athPct == null ? '—' : ta.athPct.toFixed(1) + '%'}, ${ta.isLiveAth ? 'today' : (ath == null ? '—' : ath + 'd ago')}</div>
+          <div class="value ${ta.athPct != null && ta.athPct <= (ta.athTiers?.moderate ?? DCA_MODERATE_PCT) ? 'buy' : ta.athPct != null && ta.athPct > (ta.athTiers?.watch ?? DCA_WATCH_PCT) ? 'sell' : ''}">${ta.athValue == null ? '—' : formatINR(ta.athValue, precision)}</div>
+          <div class="sub-value ${ta.athPct != null && ta.athPct <= (ta.athTiers?.moderate ?? DCA_MODERATE_PCT) ? 'buy' : ta.athPct != null && ta.athPct > (ta.athTiers?.watch ?? DCA_WATCH_PCT) ? 'sell' : ''}">${ta.athPct == null ? '—' : ta.athPct.toFixed(1) + '%'}, ${ta.isLiveAth ? 'today' : (ath == null ? '—' : ath + 'd ago')}</div>
         </div>
         <div class="detail-item">
           <div class="label">All-Time Low${ta.isLiveAtl ? ' <span>⚡</span>' : ''}</div>
@@ -1625,7 +1717,7 @@ function expandRowCore(tr, item, forceReExpand) {
       <div class="detail-group-title">Technical Confirmation</div>
       <div class="detail-grid">
         <div class="detail-item"><div class="label">Conviction</div><div class="value">${ta.strength}%</div></div>
-        <div class="detail-item"><div class="label">RSI (14, live)</div><div class="value ${ta.rsi != null && ta.rsi <= RSI_OVERSOLD ? 'buy' : ta.rsi != null && ta.rsi >= RSI_OVERBOUGHT ? 'sell' : 'rsi-value'}">${ta.rsi == null ? '—' : ta.rsi.toFixed(0)}</div></div>
+        <div class="detail-item"><div class="label">RSI (14, live)</div><div class="value ${ta.rsi != null && ta.rsi <= (ta.rsiOversoldThreshold ?? RSI_OVERSOLD) ? 'buy' : ta.rsi != null && ta.rsi >= RSI_OVERBOUGHT ? 'sell' : 'rsi-value'}">${ta.rsi == null ? '—' : ta.rsi.toFixed(0)}</div><div class="sub-value">oversold ≤${(ta.rsiOversoldThreshold ?? RSI_OVERSOLD).toFixed(0)}</div></div>
         <div class="detail-item"><div class="label">CMP → EMA 200 (live)</div><div class="value target-pct">${(ta.emaLong == null || ta.cmp == null) ? '—' : (((ta.emaLong - ta.cmp) / ta.cmp * 100) >= 0 ? '+' : '') + ((ta.emaLong - ta.cmp) / ta.cmp * 100).toFixed(1) + '% (' + formatINR(ta.emaLong, precision) + ')'}</div></div>
         <div class="detail-item">
           <div class="label">${ta.rollingLowWindowDays || DCA_DIP_WINDOW_DAYS}-Day Low${ta.isLiveLow ? ' <span>⚡</span>' : ''}</div>
@@ -1682,30 +1774,143 @@ function applyCurrentSort() {
   renderTable();
 }
 
+// Shared by the manual "Add coin" flow and the Discover-section add buttons.
+async function addCoinToPortfolio(chosenId, rawSymbol, chosenName) {
+  if (saved.some(s => s.id === chosenId)) { alert(`${rawSymbol} is already in your list.`); return false; }
+  const newCoin = { symbol: rawSymbol, id: chosenId, name: chosenName || chosenId, target: null };
+  saved.push(newCoin);
+  save();
+  buildPortfolioMap();
+
+  await checkApiStatus();
+  applyCurrentSort();
+  await fetchPrices([newCoin.id]);
+  recomputeHoldingSignals();
+  applyCurrentSort();
+  fetchTaForPortfolio([...new Set([newCoin.id, 'bitcoin'])]);
+  return true;
+}
+
 addBtn.onclick = async () => {
   if (!coinListLoaded) { setActivityStatus('Coin list not loaded yet — please wait.', 'warn'); return; }
   const rawSymbol = symbolInput.value.trim().toUpperCase();
   const chosenId = symbolInput.dataset.selectedId || null;
   const chosenName = symbolInput.dataset.selectedName || null;
   if (!chosenId) { alert('Please select a coin from the dropdown after typing.'); return; }
-  if (saved.some(s => s.id === chosenId)) { alert(`${rawSymbol} is already in your list.`); return; }
 
-  const newCoin = { symbol: rawSymbol, id: chosenId, name: chosenName || chosenId, target: null };
-  saved.push(newCoin);
-  save();
-  buildPortfolioMap();
   symbolInput.value = '';
   delete symbolInput.dataset.selectedId;
   delete symbolInput.dataset.selectedName;
   addBtn.disabled = true;
 
-  const isApiReachable = await checkApiStatus();
-  applyCurrentSort();
-  await fetchPrices([newCoin.id]);
-  recomputeHoldingSignals();
-  applyCurrentSort();
-  fetchTaForPortfolio([...new Set([newCoin.id, 'bitcoin'])]);
+  await addCoinToPortfolio(chosenId, rawSymbol, chosenName);
 };
+
+let discoverInFlight = false;
+async function discoverCandidates() {
+  if (discoverInFlight) return;
+  discoverInFlight = true;
+  discoverBtn.disabled = true;
+  discoverBtn.textContent = 'Scanning…';
+  discoverResults.innerHTML = `<div class="discover-empty">Fetching top ${DISCOVER_TOP_N} by market cap…</div>`;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const res = await fetch(`${API_BASE}/coins/markets?vs_currency=inr&order=market_cap_desc&per_page=${DISCOVER_TOP_N}&page=1&sparkline=false&price_change_percentage=7d,30d&x_cg_demo_api_key=${API_KEY}`, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (!res.ok) throw new Error(`HTTP_ERROR:${res.status}`);
+    const markets = await res.json();
+
+    const ownedIds = new Set(saved.map(s => s.id));
+    // Stage 1 prefilter — same liquidity sanity checks classifyHolding applies, all computable
+    // from this one /coins/markets response, no extra calls. The discount cutoff uses
+    // DCA_MODERATE_PCT loosened by VOL_SCALE_MAX since no per-coin volatility is known yet at this
+    // stage (no history fetched); stage 2 below applies the real volatility-scaled near-low band.
+    const prefiltered = markets.filter(md => {
+      if (ownedIds.has(md.id)) return false;
+      if (md.ath_change_percentage == null || md.ath_change_percentage > DCA_MODERATE_PCT * VOL_SCALE_MAX) return false;
+      const volume = md.total_volume, mcap = md.market_cap;
+      if (volume == null || mcap == null || mcap === 0 || volume === 0) return false;
+      if (mcap < MICROCAP_FLOOR && volume < ABSOLUTE_DEAD_VOLUME) return false;
+      if ((volume / mcap) < LIQUIDITY_DEAD_RATIO) return false;
+      return true;
+    }).sort((a, b) => a.ath_change_percentage - b.ath_change_percentage) // deepest discount first
+      .slice(0, DISCOVER_MAX_TA_FETCHES);
+
+    if (!prefiltered.length) {
+      discoverResults.innerHTML = '<div class="discover-empty">No coins outside your list clear the discount/liquidity prefilter right now.</div>';
+      return;
+    }
+
+    // Stage 2: only the short list above gets the expensive per-coin daily-history fetch, same
+    // near-low + RSI-oversold check classifyHolding uses for ACCUMULATE (no gap gate — that's
+    // anchored to a logged DCA price, which doesn't exist for a coin you don't hold yet).
+    const passing = [];
+    for (let i = 0; i < prefiltered.length; i++) {
+      const md = prefiltered[i];
+      discoverResults.innerHTML = `<div class="discover-empty">Checking price history — ${i + 1}/${prefiltered.length}…</div>`;
+      const closes = await fetchTaHistory(md.id);
+      if (closes) {
+        const ta = computeTaFromCloses(closes);
+        if (ta && auditTa(ta) && ta.rollingLow != null) {
+          const cur = md.current_price;
+          const atlWithinWindow = md.atl_date ? daysSince(md.atl_date) <= ta.rollingLowWindowDays : false;
+          const effectiveLow = Math.min(ta.rollingLow, cur, (atlWithinWindow && md.atl != null) ? md.atl : Infinity);
+          const aboveLow = (cur - effectiveLow) / effectiveLow * 100;
+          const nearLowThresholdPct = ta.nearLowThresholdPct ?? DCA_DIP_NEAR_PCT;
+          const nearLow = aboveLow <= nearLowThresholdPct;
+          const liveRsiSeries = calcRSISeries(closes.concat([cur]), RSI_PERIOD);
+          const liveRsi = liveRsiSeries.length ? liveRsiSeries[liveRsiSeries.length - 1] : null;
+          const rsiThreshold = ta.rsiOversoldThreshold ?? RSI_OVERSOLD;
+          const rsiOversold = liveRsi != null && liveRsi <= rsiThreshold;
+          if (nearLow && rsiOversold) {
+            passing.push({
+              id: md.id, symbol: (md.symbol || '').toUpperCase(), name: md.name,
+              price: cur, athPct: md.ath_change_percentage, aboveLow, rsi: liveRsi, rsiThreshold, nearLowThresholdPct,
+              windowDays: ta.rollingLowWindowDays, rank: md.market_cap_rank
+            });
+          }
+        }
+      }
+      await new Promise(r => setTimeout(r, TA_FETCH_DELAY_MS));
+    }
+
+    if (!passing.length) {
+      discoverResults.innerHTML = `<div class="discover-empty">Checked ${prefiltered.length} discount candidates — none also cleared near-low + RSI-oversold right now.</div>`;
+      return;
+    }
+
+    passing.sort((a, b) => a.athPct - b.athPct);
+    discoverResults.innerHTML = passing.map(c => `
+      <div class="discover-card" data-id="${c.id}" data-symbol="${c.symbol}" data-name="${(c.name || '').replace(/"/g, '&quot;')}">
+        <div class="dc-top">
+          <span><span class="dc-symbol">${c.symbol}</span><span class="dc-name">${c.name}</span></span>
+          <button class="dc-add">+ Add</button>
+        </div>
+        <div class="dc-reason">${Math.abs(c.athPct).toFixed(0)}% below ATH, ${c.aboveLow.toFixed(1)}% above its ${c.windowDays}d low (within its own ≤${c.nearLowThresholdPct.toFixed(1)}% band), RSI ${c.rsi.toFixed(0)} (below its own ≤${c.rsiThreshold.toFixed(0)} bottom zone)${c.rank ? ` · rank #${c.rank}` : ''} — meets the same ACCUMULATE conditions as your holdings.</div>
+      </div>
+    `).join('');
+
+    discoverResults.querySelectorAll('.dc-add').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const card = btn.closest('.discover-card');
+        btn.disabled = true;
+        btn.textContent = 'Adding…';
+        const ok = await addCoinToPortfolio(card.dataset.id, card.dataset.symbol, card.dataset.name);
+        if (ok) card.remove(); else { btn.disabled = false; btn.textContent = '+ Add'; }
+      });
+    });
+  } catch (err) {
+    discoverResults.innerHTML = '<div class="discover-empty">Scan failed — network error or CoinGecko rate limit. Try again shortly.</div>';
+  } finally {
+    discoverInFlight = false;
+    discoverBtn.disabled = false;
+    discoverBtn.textContent = 'Find candidates not in my list';
+  }
+}
+
+discoverBtn.onclick = discoverCandidates;
 
 gainHeader.addEventListener('click', () => {
   sortDir = currentSortColumn === 'gain' ? (sortDir === 'desc' ? 'asc' : 'desc') : 'desc';
